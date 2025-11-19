@@ -1,0 +1,12 @@
+# Logs
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Docker/Airflow temporary files (if any)
+.dockerignore
