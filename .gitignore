@@ -6,6 +6,7 @@
 # SENSITIVE DATA - NEVER COMMIT!
 # ==============================================================================
 .env                    # Environment variables chứa passwords
+.env.example
 connections.json        # Airflow connections export
 variables.json          # Airflow variables export
 
