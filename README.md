@@ -1,4 +1,4 @@
-# � Xây Dựng Data Pipeline Tự Động với Apache Airflow và Dashboard Phân Tích
+# � Xây Dựng Apache Airflow Pipeline cho Thu Thập và Trực Quan Hóa Dữ Liệu E-Commerce: Hỗ Trợ Ra Quyết Định Kinh Doanh cho Nhà Bán Hàng
 
 ## Cung Cấp Insight Thị Trường E-Commerce cho Nhà Bán Hàng Tiki & Lazada
 
@@ -349,3 +349,4 @@ MIT License - xem file LICENSE để biết thêm chi tiết.
 ## 📞 Support
 
 Nếu gặp vấn đề, mở issue trên GitHub hoặc liên hệ team.
+
