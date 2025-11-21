@@ -13,6 +13,7 @@ variables.json          # Airflow variables export
 # ==============================================================================
 # AIRFLOW GENERATED FILES
 # ==============================================================================
+config/
 logs/                   # Task logs (có thể rất lớn)
 *.log
 airflow.db              # SQLite metadata DB (nếu dùng local)
