@@ -262,10 +262,15 @@ def master_product_pipeline():
             cursor.close()
             conn.close()
         
+        # Get total count after load
+        cursor.execute("SELECT COUNT(*) FROM all_products")
+        total_products = cursor.fetchone()[0]
+
         return {
             "tiki_count": len(tiki_data),
             "lazada_count": len(lazada_data),
-            "processed_total": processed
+            "processed_total": processed,
+            "all_products_total_after": total_products
         }
 
     # ========================================================================
@@ -273,61 +278,89 @@ def master_product_pipeline():
     # ========================================================================
     @task(task_id="track_price_history")
     def track_price_history(load_summary: Dict) -> int:
-        if int(load_summary.get("processed_total", 0)) <= 0:
+        processed_total = int(load_summary.get("processed_total", 0) or 0)
+        
+        if processed_total <= 0:
+            logging.info("Không có sản phẩm mới để ghi lịch sử giá hôm nay.")
             return 0
         
+        # Lấy execution date từ context
         from airflow.operators.python import get_current_context
-        ds = get_current_context().get('ds')
+        context = get_current_context()
+        ds = context.get('ds')  # Format: 'YYYY-MM-DD'
 
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         conn = hook.get_conn()
         cursor = conn.cursor()
         
         try:
+            # Insert snapshot từ all_products vào price_history
+            # ON CONFLICT DO NOTHING: Tránh duplicate nếu chạy lại cùng ngày
             insert_history_sql = """
             INSERT INTO price_history 
-                (name, source, price, sold_count, review_count, review_score, brand, category, crawl_date, created_at,
-                 est_monthly_revenue)
+                (name, source, price, sold_count, review_count, review_score, brand, category, crawl_date, created_at, est_monthly_revenue)
             SELECT 
                 ap.name, ap.source, ap.price, ap.sold_count, 
                 ap.review_count, ap.review_score, ap.brand, ap.category, 
-                %s::date AS crawl_date, CURRENT_TIMESTAMP,
-                ap.est_monthly_revenue
+                %s::date AS crawl_date, CURRENT_TIMESTAMP, ap.est_monthly_revenue
             FROM all_products ap
             ON CONFLICT (name, source, crawl_date) DO NOTHING
             """
+            
             cursor.execute(insert_history_sql, (ds,))
+            inserted = cursor.rowcount
             conn.commit()
-            return cursor.rowcount
-        except Exception:
+            
+            logging.info(f"Đã ghi lịch sử giá và đánh giá cho {inserted} sản phẩm (nếu chưa tồn tại).")
+            return inserted
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Lỗi khi ghi price_history: {e}")
             return 0
         finally:
             cursor.close()
             conn.close()
 
+    # ========================================================================
+    # Task 7: Gửi thông báo thành công qua Slack
+    # ========================================================================
     @task(task_id="send_success_notification")
     def send_success_alert(load_summary: Dict, history_added: int):
-        from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
+        """
+        Gửi notification thành công lên Slack.
         
-        tiki_count = load_summary.get('tiki_count', 0)
-        lazada_count = load_summary.get('lazada_count', 0)
-        total_processed = load_summary.get('processed_total', 0)
+        Thông tin gửi đi:
+            - Execution date
+            - Số lượng sản phẩm từ Tiki và Lazada
+            - Tổng số sản phẩm đã processed
+            - Tổng số sản phẩm trong database
+            - Số snapshot thêm vào price_history
         
-        message = (
-            f"✅ *Master Pipeline Completed Successfully!* \n"
-            f"• Tiki Products: {tiki_count}\n"
-            f"• Lazada Products: {lazada_count}\n"
-            f"• Total Upserted: {total_processed}\n"
-            f"• History Snapshots: {history_added}\n"
-            f"• Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        Args:
+            load_summary (Dict): Summary từ task combine_and_load
+            history_added (int): Số bản ghi thêm vào price_history
+        """
+        from airflow.operators.python import get_current_context
+        context = get_current_context()
+        execution_date = context.get('ds', 'N/A')
+        
+        message = f"""
+        :large_green_circle: Pipeline Tiki/Lazada THÀNH CÔNG
+        *DAG*: `master_tiki_lazada_pipeline`
+        *Ngày thực thi*: `{execution_date}`
+        *Tiki (processed)*: `{load_summary.get('tiki_count', 0)}`
+        *Lazada (total)*: `{load_summary.get('lazada_count', 0)}`
+        *Tổng processed (insert/update)*: `{load_summary.get('processed_total', 0)}`
+        *Tổng trong all_products (sau load)*: `{load_summary.get('all_products_total_after', 0)}`
+        *Snapshot thêm vào price_history hôm nay*: `{history_added}`
+        """
+        
+        slack_op = SlackWebhookOperator(
+            task_id='send_success_alert_task',
+            slack_webhook_conn_id=SLACK_CONN_ID,
+            message=message,
         )
-        
-        try:
-            hook = SlackWebhookHook(slack_webhook_conn_id=SLACK_CONN_ID)
-            hook.send(text=message)
-            logging.info("Slack notification sent successfully.")
-        except Exception as e:
-            logging.error(f"Failed to send Slack notification: {e}")
+        slack_op.execute(context=context)
 
     populate_sale_periods = PostgresOperator(
         task_id="populate_sale_periods",
