@@ -254,18 +254,20 @@ def master_product_pipeline():
             cursor.executemany(insert_sql, rows_to_insert)
             conn.commit()
             processed = len(rows_to_insert)
+            
+            # Get total count after load (Must be done before closing cursor)
+            cursor.execute("SELECT COUNT(*) FROM all_products")
+            total_products = cursor.fetchone()[0]
+            
         except Exception as e:
             conn.rollback()
             logging.error(f"Batch insert failed: {e}")
             processed = 0
+            total_products = 0
         finally:
             cursor.close()
             conn.close()
         
-        # Get total count after load
-        cursor.execute("SELECT COUNT(*) FROM all_products")
-        total_products = cursor.fetchone()[0]
-
         return {
             "tiki_count": len(tiki_data),
             "lazada_count": len(lazada_data),
