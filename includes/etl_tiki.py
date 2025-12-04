@@ -17,6 +17,7 @@ import time
 from typing import List, Dict
 
 import requests
+from data_enricher import enrich_product_data  # Import module làm giàu dữ liệu
 
 # ============================================================================
 # CONFIGURATION - Cấu hình constants
@@ -128,14 +129,38 @@ def extract_tiki_data(search_query: str = "dien thoai", pages: int = 8) -> List[
             sold_info = product.get('quantity_sold', {})
             sold_count = sold_info.get('value', 0) if sold_info and isinstance(sold_info, dict) else 0
 
+            # --- CỐ GẮNG LẤY DỮ LIỆU THẬT TỪ API ---
+            original_price = product.get('original_price') or product.get('list_price')
+            discount_rate = product.get('discount_rate')
+            
+            # Lấy thông tin shop (Tiki thường có field seller)
+            # API structure có thể thay đổi, cố gắng lấy an toàn
+            seller = product.get('seller_product_detail', {}).get('store_info', {})
+            shop_name = seller.get('name')
+            
+            # TikiNow giao nhanh -> phí ship thường cao hơn hoặc free nếu có tiki now
+            is_tikinow = product.get('tiki_now') 
+            
+            # Tạo dict với các trường mới
             product_data = {
                 "name_raw": product_name,
                 "price_raw": product_price,
                 "sold_raw": sold_count,
                 "review_count": product.get('review_count') or 0,
                 "review_score": product.get('rating_average') or 0,
+                # Thêm trường mới cho Insight
+                "original_price": original_price,
+                "discount_rate": discount_rate,
+                "shop_name": shop_name,
+                # Các trường này API khó lấy ngay, để None để hàm enrich tự fake
+                "shop_location": None, 
+                "shipping_fee_est": None,
+                "stock_status": None
             }
-            all_products_data.append(product_data)
+            
+            # GỌI HÀM ENRICH ĐỂ BỔ SUNG DỮ LIỆU (Hybrid: Thật + Fake)
+            final_product = enrich_product_data(product_data)
+            all_products_data.append(final_product)
 
         # Delay để tránh bị chặn IP
         time.sleep(REQUEST_DELAY)
@@ -172,6 +197,14 @@ def transform_tiki_data(data: List[Dict]) -> List[Dict]:
             - brand: Thương hiệu (str)
             - category: Loại sản phẩm (str)
             - source: Nguồn dữ liệu = 'Tiki'
+            - original_price: Giá gốc
+            - discount_rate: % Giảm giá
+            - shop_name: Tên shop
+            - shop_location: Vị trí shop
+            - shipping_fee_est: Phí ship ước tính
+            - stock_status: Tình trạng kho
+            - rating_count_5s: Số lượng 5 sao
+            - rating_count_1s: Số lượng 1 sao
     """
     logging.info(f"Bắt đầu transform {len(data)} sản phẩm Tiki...")
     transformed_products = []
@@ -245,7 +278,16 @@ def transform_tiki_data(data: List[Dict]) -> List[Dict]:
             'review_score': review_score,
             'brand': brand,
             'category': category,
-            'source': 'Tiki'  # Đánh dấu nguồn của sản phẩm
+            'source': 'Tiki',  # Đánh dấu nguồn của sản phẩm
+            # Pass các trường đã được enrich
+            'original_price': product.get('original_price'),
+            'discount_rate': product.get('discount_rate'),
+            'shop_name': product.get('shop_name'),
+            'shop_location': product.get('shop_location'),
+            'shipping_fee_est': product.get('shipping_fee_est'),
+            'stock_status': product.get('stock_status'),
+            'rating_count_5s': product.get('rating_count_5s'),
+            'rating_count_1s': product.get('rating_count_1s')
         })
     
     logging.info(f"Tiki - Transform hoàn tất! {len(transformed_products)} sản phẩm đã được làm sạch.")

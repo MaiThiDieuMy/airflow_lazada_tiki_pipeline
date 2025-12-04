@@ -29,6 +29,7 @@ from typing import Dict, List, Optional
 
 import requests
 from requests import RequestException
+from data_enricher import enrich_product_data  # Import module làm giàu dữ liệu
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -65,6 +66,8 @@ PRODUCT_ITEM_SELECTOR = "div[data-qa-locator='product-item']"
 PRODUCT_NAME_SELECTOR = "a[title]"
 PRODUCT_PRICE_SELECTOR = "span.ooOxS"
 PRODUCT_SOLD_SELECTOR = "span.sales"
+PRODUCT_ORIGINAL_PRICE_SELECTOR = "span.del"  # Thường là giá gạch ngang (cần verify với HTML thực tế)
+PRODUCT_LOCATION_SELECTOR = "span.item-location" # Vị trí shop (cần verify)
 
 # Brand Keywords Mapping
 # Dùng để xác định thương hiệu từ tên sản phẩm
@@ -255,10 +258,21 @@ def extract_lazada_data(
                 except Exception:
                     pass
                 
-                try:
                     product_url = item.find_element(By.CSS_SELECTOR, PRODUCT_NAME_SELECTOR).get_attribute('href')
                 except Exception:
                     pass
+
+                # --- CỐ GẮNG LẤY DỮ LIỆU THẬT CHO INSIGHT ---
+                original_price_text = ""
+                location_text = ""
+                
+                try:
+                    original_price_text = item.find_element(By.CSS_SELECTOR, PRODUCT_ORIGINAL_PRICE_SELECTOR).text
+                except: pass
+                
+                try:
+                    location_text = item.find_element(By.CSS_SELECTOR, PRODUCT_LOCATION_SELECTOR).text
+                except: pass
 
                 # Chỉ lưu sản phẩm có đủ thông tin cơ bản
                 if name and price and product_url:
@@ -267,6 +281,9 @@ def extract_lazada_data(
                         "price_raw": price,
                         "sold_raw": sold_text,
                         "product_url": product_url,
+                        # Lưu raw text cho các trường mới, sẽ clean ở bước Transform
+                        "original_price_raw": original_price_text,
+                        "shop_location_raw": location_text,
                     })
 
             # Lấy reviews song song để tăng tốc độ (quan trọng!)
@@ -285,6 +302,8 @@ def extract_lazada_data(
                     "sold_raw": product["sold_raw"],
                     "review_count": product.get("review_count", 0),
                     "review_score": product.get("review_score", 0),
+                    "original_price_raw": product.get("original_price_raw"),
+                    "shop_location_raw": product.get("shop_location_raw"),
                 })
                 collected += 1
                 
@@ -561,6 +580,10 @@ def transform_lazada_data(data: List[Dict]) -> List[Dict]:
             - brand: Thương hiệu (str)
             - category: Loại sản phẩm (str)
             - source: Nguồn dữ liệu = 'Lazada'
+            - original_price: Giá gốc
+            - shop_location: Vị trí shop
+            - shop_name: Tên shop
+            - ... (các trường enriched khác)
     """
     logging.info(f"Bắt đầu transform {len(data)} sản phẩm Lazada...")
     transformed_products = []
@@ -615,8 +638,21 @@ def transform_lazada_data(data: List[Dict]) -> List[Dict]:
         elif "máy tính bảng" in name_lower or "ipad" in name_lower or "galaxy tab" in name_lower:
             category = "Máy tính bảng"
 
-        # 7. Tạo cleaned product record
-        transformed_products.append({
+        # 8. Clean các trường mới (Original Price & Location)
+        original_price = 0
+        if product.get('original_price_raw'):
+            try:
+                # Remove non-digits
+                op_clean = re.sub(r'[^\d]', '', product['original_price_raw'])
+                original_price = int(op_clean)
+            except: pass
+            
+        shop_location = product.get('shop_location_raw')
+        if shop_location:
+            shop_location = shop_location.strip()
+
+        # 9. Tạo dict sơ bộ
+        cleaned_item = {
             'name': name_clean,
             'price': price_clean,
             'sold_count': sold_clean,
@@ -624,8 +660,17 @@ def transform_lazada_data(data: List[Dict]) -> List[Dict]:
             'review_score': review_score,
             'brand': brand,
             'category': category,
-            'source': 'Lazada'  # Đánh dấu nguồn
-        })
+            'source': 'Lazada',
+            # Pass các trường đã lấy được
+            'original_price': original_price if original_price > 0 else None,
+            'shop_location': shop_location,
+            'shop_name': None, # Selenium khó lấy tên shop ở trang search, để Fake
+        }
+        
+        # --- BƯỚC CUỐI: ENRICH (Điền dữ liệu giả cho các trường thiếu) ---
+        enriched_item = enrich_product_data(cleaned_item)
+        
+        transformed_products.append(enriched_item)
     
     logging.info(f"Transform hoàn tất! {len(transformed_products)} sản phẩm đã được làm sạch.")
     return transformed_products
