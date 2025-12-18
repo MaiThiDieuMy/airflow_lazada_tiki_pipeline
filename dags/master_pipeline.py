@@ -30,13 +30,14 @@ from airflow.operators.empty import EmptyOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.slack.operators.slack_webhook import SlackWebhookOperator
+from airflow.operators.python import get_current_context
 from datetime import datetime, timedelta
 from typing import List, Dict
 
 from etl_tiki import run_tiki_etl
 from etl_lazada import run_lazada_etl
 
-# ... (CONFIGURATION giữ nguyên) ...
+
 POSTGRES_CONN_ID = "postgres_data_conn"
 SLACK_CONN_ID = "slack_webhook_conn"
 DEFAULT_ARGS = {'owner': 'data_team', 'retries': 1, 'retry_delay': timedelta(minutes=2)}
@@ -114,21 +115,37 @@ CREATE TABLE IF NOT EXISTS price_history (
     source TEXT NOT NULL,
     price INT,
     sold_count INT DEFAULT 0,
+    review_count INT DEFAULT 0,
+    review_score DECIMAL(3,2) DEFAULT 0.0,
+    brand TEXT,
+    category TEXT,
     crawl_date DATE DEFAULT CURRENT_DATE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    est_monthly_revenue BIGINT,
     UNIQUE(name, source, crawl_date)
 );
 
--- Migration cho price_history (Thêm các cột để lưu lịch sử insight nếu cần)
+-- Migration cho price_history (Đảm bảo cột tồn tại nếu bảng đã tạo từ trước)
 DO $$ 
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='price_history' AND column_name='est_monthly_revenue') THEN
         ALTER TABLE price_history ADD COLUMN est_monthly_revenue BIGINT;
     END IF;
-    -- ... (Các cột khác giữ nguyên như file cũ) ...
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='price_history' AND column_name='review_count') THEN
+        ALTER TABLE price_history ADD COLUMN review_count INT DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='price_history' AND column_name='review_score') THEN
+        ALTER TABLE price_history ADD COLUMN review_score DECIMAL(3,2) DEFAULT 0.0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='price_history' AND column_name='brand') THEN
+        ALTER TABLE price_history ADD COLUMN brand TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='price_history' AND column_name='category') THEN
+        ALTER TABLE price_history ADD COLUMN category TEXT;
+    END IF;
 END $$;
 
--- ... (Bảng sale_periods và Indexes giữ nguyên như cũ) ...
+-- Bảng sale_periods để định nghĩa các đợt sale
 CREATE TABLE IF NOT EXISTS sale_periods (
     id SERIAL PRIMARY KEY,
     period_name TEXT NOT NULL UNIQUE,
@@ -140,7 +157,7 @@ CREATE TABLE IF NOT EXISTS sale_periods (
 );
 """
 
-# ... (POPULATE_SALE_PERIODS_SQL và on_failure_callback giữ nguyên) ...
+#POPULATE_SALE_PERIODS_SQL và on_failure_callback
 POPULATE_SALE_PERIODS_SQL = """
 INSERT INTO sale_periods (period_name, start_date, end_date, period_type, description)
 VALUES 
@@ -151,8 +168,36 @@ ON CONFLICT (period_name) DO NOTHING;
 """
 
 def on_failure_callback(context):
-    # ... (Code callback giữ nguyên) ...
-    pass 
+    """
+    Callback function to send Slack alert on task failure.
+    Logs the error and sends a formatted message to Slack.
+    """
+    task_instance = context.get('task_instance')
+    dag_id = task_instance.dag_id
+    task_id = task_instance.task_id
+    execution_date = context.get('execution_date')
+    exception = context.get('exception')
+    log_url = task_instance.log_url
+
+    message = f"""
+    :red_circle: *TASK FAILED ALERT*
+    *DAG*: `{dag_id}`
+    *Task*: `{task_id}`
+    *Time*: `{execution_date}`
+    *Exception*: ```{exception}```
+    *Log*: <{log_url}|View Logs>
+    """
+
+    try:
+        slack_alert = SlackWebhookOperator(
+            task_id='send_slack_fail_notification',
+            slack_webhook_conn_id=SLACK_CONN_ID,
+            message=message,
+        )
+        slack_alert.execute(context=context)
+        logging.info("Sent Slack failure notification successfully.")
+    except Exception as e:
+        logging.error(f"Failed to send Slack failure alert: {e}") 
 
 # ============================================================================
 # DAG DEFINITION
@@ -287,7 +332,6 @@ def master_product_pipeline():
             return 0
         
         # Lấy execution date từ context
-        from airflow.operators.python import get_current_context
         context = get_current_context()
         ds = context.get('ds')  # Format: 'YYYY-MM-DD'
 
@@ -342,7 +386,6 @@ def master_product_pipeline():
             load_summary (Dict): Summary từ task combine_and_load
             history_added (int): Số bản ghi thêm vào price_history
         """
-        from airflow.operators.python import get_current_context
         context = get_current_context()
         execution_date = context.get('ds', 'N/A')
         
